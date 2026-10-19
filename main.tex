@@ -1,0 +1,368 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T2A]{fontenc}
+\usepackage[russian]{babel}
+\usepackage{textcomp}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{array}
+\usepackage{booktabs}
+
+% Настройка полей
+\geometry{
+    a4paper,
+    left=2.5cm,
+    right=1.5cm,
+    top=2cm,
+    bottom=2cm
+}
+
+% Настройка заголовков
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+
+% Настройка кода
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!40!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny,
+    breaklines=true,
+    frame=single,
+    captionpos=b,
+    showstringspaces=false,
+    tabsize=4
+}
+
+% Настройка колонтитулов
+\setlength{\headheight}{15pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Лабораторная работа №2: Развитие AI-сервиса}
+\fancyhead[R]{\thepage}
+\fancyfoot[C]{}
+
+\begin{document}
+
+\begin{titlepage}
+    \begin{center}
+        \textbf{МИНИСТЕРСТВО НАУКИ И ВЫСШЕГО ОБРАЗОВАНИЯ РОССИЙСКОЙ ФЕДЕРАЦИИ}
+        \vspace{0.5cm}
+
+        \textbf{Федерального государственного автономного образовательного учреждения \\ высшего образования}
+        \vspace{0.3cm}
+
+        \textbf{«НАЦИОНАЛЬНЫЙ ИССЛЕДОВАТЕЛЬСКИЙ ТЕХНОЛОГИЧЕСКИЙ УНИВЕРСИТЕТ МИСИС»}
+        \vspace{2cm}
+
+        \textbf{Институт компьютерных наук}
+        \vspace{0.3cm}
+
+        \textbf{Кафедра Инженерной кибернетики}
+        \vspace{1cm}
+
+        \textbf{Лабораторная работа №2}
+        \vspace{0.3cm}
+
+        \textbf{по дисциплине «Современные интеллектуальные сетевые сервисы»}
+        \vspace{1.5cm}
+
+        \huge{\textbf{Развитие AI-сервиса: \\ сквозная идентификация запросов, \\ асинхронная обработка и интеграция LLM}}
+        \vspace{2cm}
+    \end{center}
+
+    \begin{flushright}
+        \textbf{Выполнил:} \\
+        Студент группы МПИ 25-1-2\\
+        Д.А. Комарова \\
+        \vspace{0.5cm}
+        \textbf{Проверил:} \\
+        Преподаватель \\
+        М.Е. Корнет \\
+        \vspace{2cm}
+        \textbf{Оценка:} \hrulefill
+    \end{flushright}
+
+    \begin{center}
+        \vfill
+        Москва, 2026
+    \end{center}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Цель работы}
+
+Цель практической работы — развить ранее созданный REST API сервиса агроскоринга и приблизить его архитектуру к реальному промышленному AI-сервису. В ходе работы необходимо изучить и реализовать механизмы, которые возникают при эксплуатации сервиса: сквозную идентификацию запросов с помощью \texttt{request\_id}, использование промежуточных слоёв (middleware), управление очередью запросов и пакетным инференсом, хранение результатов в базе данных SQLite, асинхронное взаимодействие с внешними сервисами и подключение большой языковой модели через HTTP API.
+
+\section{Задачи работы}
+
+В ходе лабораторной работы необходимо реализовать:
+\begin{enumerate}
+    \item Модификацию API для назначения уникального \texttt{request\_id}.
+    \item Middleware для извлечения/генерации \texttt{request\_id} и измерения времени выполнения.
+    \item Два режима инференса: одиночный и пакетный.
+    \item Очередь запросов на базе \texttt{asyncio.Queue}.
+    \item Динамическое формирование пакета (dynamic batching).
+    \item Эксплуатационные ограничения (размер batch, время ожидания, размер очереди, таймаут).
+    \item Механизм backpressure (возврат HTTP 429 при переполнении).
+    \item Подключение SQLite для постоянного хранения.
+    \item Асинхронную работу с БД через \texttt{aiosqlite}.
+    \item Запись, чтение, поиск по ID и пагинацию результатов.
+    \item Подключение внешней LLM через HTTP API.
+    \item Асинхронный HTTP-клиент \texttt{httpx.AsyncClient}.
+    \item Endpoint для запроса к LLM.
+    \item Обработку ошибок внешних зависимостей (400, 404, 409, 422, 429, 500, 502, 503, 504).
+    \item Тестирование и анализ полного пути запроса.
+\end{enumerate}
+
+\section{Краткая теоретическая часть}
+
+\textbf{Request\_id} используется для сквозной идентификации запроса в микросервисной архитектуре. Middleware перехватывает запрос, проверяет наличие заголовка \texttt{X-Request-ID}, и если его нет — генерирует UUID, сохраняя в \texttt{request.state}.
+
+\textbf{Batching} повышает throughput за счёт группировки запросов. \textit{Explicit batching} — клиент сам присылает пакет. \textit{Dynamic batching} — сервер накапливает одиночные запросы в очереди и отправляет их в модель пачкой при достижении лимита \texttt{MAX\_BATCH\_SIZE} или по истечении \texttt{MAX\_BATCH\_WAIT\_MS}.
+
+\textbf{Backpressure} ограничивает размер очереди. Если она переполнена, сервис возвращает 429 Too Many Requests, защищая память от перегрузки и деградации latency.
+
+\textbf{SQLite + aiosqlite} позволяют асинхронно работать с файловой БД без блокировки event loop. Режим WAL (Write-Ahead Logging) позволяет читателям и писателям не блокировать друг друга.
+
+\textbf{LLM интеграция} осуществляется через \texttt{httpx.AsyncClient} с таймаутом. Если внешний сервис недоступен, FastAPI возвращает 502/503/504.
+
+\section{Результаты выполнения заданий}
+
+\subsection{Задание 1-2. Сквозной request\_id и Middleware}
+Реализовано middleware \texttt{request\_context\_middleware}, которое перехватывает каждый запрос. Оно извлекает \texttt{X-Request-ID} из заголовков или генерирует новый UUID с помощью \texttt{uuid.uuid4()}, сохраняет его в \texttt{request.state.request\_id}, замеряет время выполнения через \texttt{time.perf\_counter()} и добавляет заголовки \texttt{X-Request-ID} и \texttt{X-Process-Time} в ответ.
+
+\subsection{Задание 3. Обработка ошибок}
+Настроены обработчики для возврата кодов 400 (неизвестный регион), 404 (прогноз не найден), 409 (несколько прогнозов для одного request\_id), 422 (ошибки Pydantic при неверных типах или размере batch), 429 (переполнение очереди), 502/503/504 (ошибки внешней LLM и таймауты).
+
+\subsection{Задание 4-6. SQLite и чтение результатов}
+Создан модуль \texttt{database.py} с использованием \texttt{aiosqlite}. Таблица \texttt{predictions} содержит все необходимые поля. \texttt{POST /predict} сохраняет результат в БД. \texttt{GET /predictions} и \texttt{GET /predictions/\{request\_id\}} читают данные из SQLite. Если \texttt{request\_id} относится к batch и содержит несколько записей, возвращается 409.
+
+\textbf{Ответ на вопрос:} Блокирующий \texttt{sqlite3.execute()} останавливает весь event loop на время работы с диском, что приводит к таймаутам у других клиентов. \texttt{aiosqlite} выносит операции в отдельный поток.
+
+\subsection{Задание 7. Пагинация}
+Реализован endpoint \texttt{GET /predictions/by-weekday}, который с помощью \texttt{LIMIT} и \texttt{OFFSET} возвращает порцию записей для выбранного дня недели, а также метаинформацию (текущая страница, всего страниц, всего элементов).
+
+\subsection{Задание 8. Explicit batching}
+Реализован \texttt{POST /batch-predict}, принимающий список объектов. Размер списка ограничен 8 элементами. Обработка происходит в цикле, результаты сохраняются в БД.
+
+\textbf{Ответ на вопрос:} Один \texttt{executemany()} создаёт одну транзакцию и один вызов fsync на диск. Восемь отдельных \texttt{INSERT + COMMIT} вызовут восемь синхронизаций диска, что в сотни раз медленнее.
+
+\subsection{Задание 9-11. Очередь, backpressure и timeout}
+Создан \texttt{queue\_manager.py} с \texttt{asyncio.Queue}. Воркер накапливает запросы до 8 штук или ждёт 50 мс, затем обрабатывает их. Реализован endpoint \texttt{POST /predict-queued}. Если очередь заполнена (100 элементов), возвращается 429. Время ожидания ответа от модели ограничено \texttt{INFERENCE\_TIMEOUT\_SECONDS} через \texttt{asyncio.wait\_for}. При превышении возвращается 504.
+
+\textbf{Ответ на вопрос:} При неограниченной очереди память будет расти бесконечно, пока сервер не упадёт с OOM. Latency также будет расти бесконечно, так как запросы будут ждать часами.
+
+\subsection{Задание 12-14. Внешняя LLM}
+Создан \texttt{llm\_service.py}, использующий \texttt{httpx.AsyncClient} для запросов к Vireonix. Реализован \texttt{POST /llm/chat} для прямого запроса. Реализован \texttt{POST /predict-with-llm}, который сначала считает риск, а затем просит LLM объяснить результат. Если LLM недоступна, возвращается только результат скоринга с пометкой об ошибке.
+
+\section{Скриншоты работы приложения}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{01_swagger.png}
+    \caption{Общий вид Swagger UI}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{02_predict.png}
+    \caption{Выполнение POST /predict}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{03_db_read.png}
+    \caption{Чтение результатов из SQLite (GET /predictions)}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{04_batch.png}
+    \caption{Явный батчинг (POST /batch-predict)}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{05_queue_status.png}
+    \caption{Статус очереди (GET /queue-status)}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{06_pagination.png}
+    \caption{Пагинация по дню недели}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{07_llm_chat.png}
+    \caption{Запрос к внешней LLM (504 Timeout)}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{08_predict_llm.png}
+    \caption{Инференс с объяснением от LLM}
+\end{figure}
+
+\section{Таблица тест-кейсов}
+
+\begin{table}[H]
+\centering
+\caption{Таблица тест-кейсов с ожидаемыми HTTP-кодами}
+\label{tab:test_cases}
+\begin{tabular}{|c|p{5cm}|c|c|c|}
+\hline
+\textbf{№} & \textbf{Запрос} & \textbf{Ожидаемый} & \textbf{Полученный} & \textbf{Результат} \\
+\hline
+1  & GET /health & 200 & 200 & Успех \\
+2  & корректный POST /predict & 200 & 200 & Успех \\
+3  & area\_ha = -100 & 422 & 422 & Успех \\
+4  & неизвестный регион & 400 & 400 & Успех \\
+5  & существующий request\_id & 200 & 200 & Успех \\
+6  & неизвестный request\_id & 404 & 404 & Успех \\
+7  & корректный POST /batch-predict & 200 & 200 & Успех \\
+8  & batch больше MAX\_BATCH\_SIZE & 422 & 422 & Успех \\
+9  & POST /predict-queued & 200 & 200 & Успех \\
+10 & переполненная очередь & 429 & 429 & Успех \\
+11 & GET /predictions/by-weekday & 200 & 200 & Успех \\
+12 & page = -1 & 422 & 422 & Успех \\
+13 & неизвестный weekday & 400 & 400 & Успех \\
+14 & корректный POST /llm/chat & 200 & 504 & Ошибка LLM \\
+15 & недоступный LLM & 502/503/504 & 504 & Ожидаемо \\
+16 & корректный POST /predict-with-llm & 200 & 200 & Успех \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Таблица API-контракта}
+
+\begin{table}[H]
+\centering
+\caption{Таблица API-контракта}
+\label{tab:api_contract}
+\begin{tabular}{|p{3.2cm}|p{1.4cm}|p{2.4cm}|p{3cm}|p{1.2cm}|p{2.4cm}|}
+\hline
+\textbf{Endpoint} & \textbf{Method} & \textbf{Input} & \textbf{Output} & \textbf{Success} & \textbf{Возможные ошибки} \\
+\hline
+/health & GET & --- & status & 200 & 500 \\
+/predict & POST & FarmRequest & PredictionResponse & 200 & 400, 422, 503, 504 \\
+/batch-predict & POST & BatchRequest & BatchPredictionResponse & 200 & 400, 422, 503, 504 \\
+/predict-queued & POST & FarmRequest & PredictionResponse & 200 & 400, 422, 429, 503, 504 \\
+/predictions & GET & query & list & 200 & 400, 422, 503 \\
+/predictions/by-weekday & GET & weekday, page, per\_page & paginated response & 200 & 400, 404, 422 \\
+/llm/chat & POST & LLMChatRequest & LLMChatResponse & 200 & 422, 502, 503, 504 \\
+/predict-with-llm & POST & FarmRequest & PredictWithLLMResponse & 200 & 400, 422, 502, 503, 504 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Ссылка на исходный код}
+
+Исходный код приложения доступен в репозитории: \url{https://github.com/dashakomarova2002-commits/HW_2_SISS}
+
+\section{Вывод}
+
+В ходе работы мы расширили архитектуру AI-сервиса агроскоринга. \texttt{request\_id} обеспечивает сквозную трассировку, позволяя связать логи, ошибки и записи в БД с конкретным клиентским запросом. Middleware изолирует эту логику от бизнес-кода. Batching (явный и динамический) позволяет повысить пропускную способность за счёт группировки запросов к модели. Backpressure (429) и таймауты (504) защищают сервис от перегрузки и зависаний. База данных SQLite (через \texttt{aiosqlite}) обеспечивает надежное постоянное хранение результатов без блокировки event loop. Интеграция с LLM через \texttt{httpx.AsyncClient} позволяет обогащать результаты текстовыми объяснениями, при этом сервис устойчив к сбоям внешнего провайдера, корректно возвращая коды 502/503/504.
+
+\section*{Приложение А: Исходный код}
+
+\begin{lstlisting}[caption={main.py}]
+import uuid
+import time
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, Response, HTTPException, Query, status
+
+from schemas import (
+    FarmRequest, PredictionResponse, BatchRequest, BatchPredictionResponse,
+    PaginatedResponse, QueueStatusResponse, LLMChatRequest, LLMChatResponse,
+    PredictWithLLMResponse
+)
+from services import build_prediction, is_valid_region
+from database import (
+    init_db, save_one_prediction, get_predictions_by_req_id,
+    get_predictions_list, get_predictions_by_weekday_paginated
+)
+from queue_manager import (
+    queue, worker, QUEUE_MAX_SIZE, MAX_BATCH_SIZE, MAX_BATCH_WAIT_MS,
+    INFERENCE_TIMEOUT_SECONDS
+)
+from llm_service import call_llm
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    task = asyncio.create_task(worker())
+    yield
+    task.cancel()
+
+app = FastAPI(
+    title="Agro Scoring API",
+    description="API for agricultural risk scoring (Lab 2)",
+    version="2.0.0",
+    lifespan=lifespan
+)
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    start_time = time.perf_counter()
+    logger.info(f"[{request_id}] START {request.method} {request.url.path}")
+
+    try:
+        response: Response = await call_next(request)
+    except Exception as e:
+        logger.error(f"[{request_id}] ERROR {str(e)}")
+        response = Response(
+            content=f'{{"detail": "Internal server error", "request_id": "{request_id}"}}',
+            status_code=500,
+            media_type="application/json"
+        )
+
+    process_time = time.perf_counter() - start_time
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Process-Time"] = f"{process_time:.4f}"
+    logger.info(f"[{request_id}] END {request.method} {request.url.path} - {response.status_code} in {process_time:.4f}s")
+    return response
+
+@app.get("/health")
+async def health(request: Request):
+    return {"status": "ok", "request_id": request.state.request_id}
+
+@app.post("/predict", response_model=PredictionResponse, status_code=status.HTTP_200_OK)
+async def predict(request_body: FarmRequest, request: Request):
+    request_id = request.state.request_id
+    if not is_valid_region(request_body.region):
+        raise HTTPException(status_code=400, detail="Unknown region")
+
+    result = build_prediction(request_body, request_id)
+    await save_one_prediction(result, source="single")
+    return result
+
+# ... (other endpoints are omitted for brevity)
+\end{lstlisting}
+
+\end{document}
